@@ -5,20 +5,20 @@
 
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of.h>
 
 #include <video/mipi_display.h>
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
-#include <drm/drm_probe_helper.h>
 
 struct mdss_dsi_ili7807e {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
+	bool prepared;
 };
 
 static inline
@@ -37,48 +37,74 @@ static void mdss_dsi_ili7807e_reset(struct mdss_dsi_ili7807e *ctx)
 
 static int mdss_dsi_ili7807e_on(struct mdss_dsi_ili7807e *ctx)
 {
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct device *dev = &dsi->dev;
+	int ret;
 
-	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
-	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 100);
-	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
-	mipi_dsi_usleep_range(&dsi_ctx, 10000, 11000);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x78, 0x07, 0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x39, 0x23);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x4c, 0x23);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x69, 0x23);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x7c, 0x23);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x78, 0x07, 0x00);
-	mipi_dsi_dcs_set_display_brightness_multi(&dsi_ctx, 0xff0f);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
-				     0x2c);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x78, 0x07, 0x05);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_LUT, 0x33);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_MEMORY_CONTINUE,
-				     0x27);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x78, 0x07, 0x0e);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
-				     0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x78, 0x07, 0x06);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x57, 0x2c);
+	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
+	if (ret < 0) {
+		dev_err(dev, "Failed to exit sleep mode: %d\n", ret);
+		return ret;
+	}
+	msleep(100);
 
-	return dsi_ctx.accum_err;
+	ret = mipi_dsi_dcs_set_display_on(dsi);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set display on: %d\n", ret);
+		return ret;
+	}
+	usleep_range(10000, 11000);
+
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x78, 0x07, 0x01);
+	mipi_dsi_dcs_write_seq(dsi, 0x39, 0x23);
+	mipi_dsi_dcs_write_seq(dsi, 0x4c, 0x23);
+	mipi_dsi_dcs_write_seq(dsi, 0x69, 0x23);
+	mipi_dsi_dcs_write_seq(dsi, 0x7c, 0x23);
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x78, 0x07, 0x00);
+
+	ret = mipi_dsi_dcs_set_display_brightness(dsi, 0xff0f);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set display brightness: %d\n", ret);
+		return ret;
+	}
+
+	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x2c);
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x78, 0x07, 0x05);
+	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_LUT, 0x33);
+	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_MEMORY_CONTINUE, 0x27);
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x78, 0x07, 0x0e);
+	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x01);
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x78, 0x07, 0x06);
+	mipi_dsi_dcs_write_seq(dsi, 0x57, 0x2c);
+
+	return 0;
 }
 
 static int mdss_dsi_ili7807e_off(struct mdss_dsi_ili7807e *ctx)
 {
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct device *dev = &dsi->dev;
+	int ret;
 
-	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
-	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
-	mipi_dsi_usleep_range(&dsi_ctx, 10000, 11000);
-	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 150);
+	ret = mipi_dsi_dcs_set_display_off(dsi);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set display off: %d\n", ret);
+		return ret;
+	}
+	usleep_range(10000, 11000);
 
-	return dsi_ctx.accum_err;
+	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
+	if (ret < 0) {
+		dev_err(dev, "Failed to enter sleep mode: %d\n", ret);
+		return ret;
+	}
+	msleep(150);
+
+	return 0;
 }
 
 static int mdss_dsi_ili7807e_prepare(struct drm_panel *panel)
@@ -86,6 +112,9 @@ static int mdss_dsi_ili7807e_prepare(struct drm_panel *panel)
 	struct mdss_dsi_ili7807e *ctx = to_mdss_dsi_ili7807e(panel);
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
+
+	if (ctx->prepared)
+		return 0;
 
 	mdss_dsi_ili7807e_reset(ctx);
 
@@ -96,6 +125,7 @@ static int mdss_dsi_ili7807e_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
+	ctx->prepared = true;
 	return 0;
 }
 
@@ -105,12 +135,16 @@ static int mdss_dsi_ili7807e_unprepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
+	if (!ctx->prepared)
+		return 0;
+
 	ret = mdss_dsi_ili7807e_off(ctx);
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 
+	ctx->prepared = false;
 	return 0;
 }
 
@@ -126,13 +160,25 @@ static const struct drm_display_mode mdss_dsi_ili7807e_mode = {
 	.vtotal = 1920 + 16 + 8 + 8,
 	.width_mm = 68,
 	.height_mm = 120,
-	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static int mdss_dsi_ili7807e_get_modes(struct drm_panel *panel,
 				       struct drm_connector *connector)
 {
-	return drm_connector_helper_get_modes_fixed(connector, &mdss_dsi_ili7807e_mode);
+	struct drm_display_mode *mode;
+
+	mode = drm_mode_duplicate(connector->dev, &mdss_dsi_ili7807e_mode);
+	if (!mode)
+		return -ENOMEM;
+
+	drm_mode_set_name(mode);
+
+	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+	connector->display_info.width_mm = mode->width_mm;
+	connector->display_info.height_mm = mode->height_mm;
+	drm_mode_probed_add(connector, mode);
+
+	return 1;
 }
 
 static const struct drm_panel_funcs mdss_dsi_ili7807e_panel_funcs = {
@@ -147,11 +193,9 @@ static int mdss_dsi_ili7807e_probe(struct mipi_dsi_device *dsi)
 	struct mdss_dsi_ili7807e *ctx;
 	int ret;
 
-	ctx = devm_drm_panel_alloc(dev, struct mdss_dsi_ili7807e, panel,
-				   &mdss_dsi_ili7807e_panel_funcs,
-				   DRM_MODE_CONNECTOR_DSI);
-	if (IS_ERR(ctx))
-		return PTR_ERR(ctx);
+	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
@@ -167,6 +211,8 @@ static int mdss_dsi_ili7807e_probe(struct mipi_dsi_device *dsi)
 			  MIPI_DSI_MODE_VIDEO_HSE |
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
+	drm_panel_init(&ctx->panel, dev, &mdss_dsi_ili7807e_panel_funcs,
+		       DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
 	ret = drm_panel_of_backlight(&ctx->panel);
@@ -177,8 +223,9 @@ static int mdss_dsi_ili7807e_probe(struct mipi_dsi_device *dsi)
 
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
+		dev_err(dev, "Failed to attach to DSI host: %d\n", ret);
 		drm_panel_remove(&ctx->panel);
-		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
+		return ret;
 	}
 
 	return 0;

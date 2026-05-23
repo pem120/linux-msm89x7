@@ -6,8 +6,8 @@
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/regulator/consumer.h>
 
 #include <video/mipi_display.h>
@@ -15,19 +15,14 @@
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
-#include <drm/drm_probe_helper.h>
 
 struct tm_otm1901a {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
-	struct regulator_bulk_data *supplies;
+	struct regulator_bulk_data supplies[3];
 	struct gpio_desc *reset_gpio;
 	struct gpio_desc *backlight_gpio;
-};
-
-static const struct regulator_bulk_data tm_otm1901a_supplies[] = {
-	{ .supply = "vsn" },
-	{ .supply = "vsp" },
+	bool prepared;
 };
 
 static inline struct tm_otm1901a *to_tm_otm1901a(struct drm_panel *panel)
@@ -47,54 +42,83 @@ static void tm_otm1901a_reset(struct tm_otm1901a *ctx)
 
 static int tm_otm1901a_on(struct tm_otm1901a *ctx)
 {
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct device *dev = &dsi->dev;
+	int ret;
 
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x19, 0x01, 0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x80);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x19, 0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x1c, 0x33);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x1c, 0x05);
-	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0x0000, 0x02cf);
-	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0x0000, 0x04ff);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x90);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xd7, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x91);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xd7, 0xc8);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0xba);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc0, 0xc2, 0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0xb0);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xca, 0x02);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x80);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xca, 0x80);
-	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0xc1);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc5, 0x77);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x00, 0x86);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf3, 0xe0);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11, 0x00);
-	mipi_dsi_msleep(&dsi_ctx, 30);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x29, 0x00);
-	mipi_dsi_usleep_range(&dsi_ctx, 10000, 11000);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
-				     0x24);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x00);
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x19, 0x01, 0x01);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x80);
+	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x19, 0x01);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x00);
+	mipi_dsi_dcs_write_seq(dsi, 0x1c, 0x33);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x00);
+	mipi_dsi_dcs_write_seq(dsi, 0x1c, 0x05);
 
-	return dsi_ctx.accum_err;
+	ret = mipi_dsi_dcs_set_column_address(dsi, 0x0000, 0x02cf);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set column address: %d\n", ret);
+		return ret;
+	}
+
+	ret = mipi_dsi_dcs_set_page_address(dsi, 0x0000, 0x04ff);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set page address: %d\n", ret);
+		return ret;
+	}
+
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x90);
+	mipi_dsi_dcs_write_seq(dsi, 0xd7, 0x00);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x91);
+	mipi_dsi_dcs_write_seq(dsi, 0xd7, 0xc8);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0xba);
+	mipi_dsi_dcs_write_seq(dsi, 0xc0, 0xc2, 0x01);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0xb0);
+	mipi_dsi_dcs_write_seq(dsi, 0xca, 0x02);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x80);
+	mipi_dsi_dcs_write_seq(dsi, 0xca, 0x80);
+
+	ret = mipi_dsi_dcs_set_tear_on(dsi, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set tear on: %d\n", ret);
+		return ret;
+	}
+
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0xc1);
+	mipi_dsi_dcs_write_seq(dsi, 0xc5, 0x77);
+	mipi_dsi_dcs_write_seq(dsi, 0x00, 0x86);
+	mipi_dsi_dcs_write_seq(dsi, 0xf3, 0xe0);
+	mipi_dsi_dcs_write_seq(dsi, 0x11, 0x00);
+	msleep(30);
+	mipi_dsi_dcs_write_seq(dsi, 0x29, 0x00);
+	usleep_range(10000, 11000);
+	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x24);
+	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
+
+	return 0;
 }
 
 static int tm_otm1901a_off(struct tm_otm1901a *ctx)
 {
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct device *dev = &dsi->dev;
+	int ret;
 
-	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 53);
-	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 120);
+	ret = mipi_dsi_dcs_set_display_off(dsi);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set display off: %d\n", ret);
+		return ret;
+	}
+	msleep(53);
 
-	return dsi_ctx.accum_err;
+	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
+	if (ret < 0) {
+		dev_err(dev, "Failed to enter sleep mode: %d\n", ret);
+		return ret;
+	}
+	msleep(120);
+
+	return 0;
 }
 
 static int tm_otm1901a_prepare(struct drm_panel *panel)
@@ -103,7 +127,10 @@ static int tm_otm1901a_prepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(tm_otm1901a_supplies), ctx->supplies);
+	if (ctx->prepared)
+		return 0;
+
+	ret = regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
 	if (ret < 0) {
 		dev_err(dev, "Failed to enable regulators: %d\n", ret);
 		return ret;
@@ -115,10 +142,11 @@ static int tm_otm1901a_prepare(struct drm_panel *panel)
 	if (ret < 0) {
 		dev_err(dev, "Failed to initialize panel: %d\n", ret);
 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		regulator_bulk_disable(ARRAY_SIZE(tm_otm1901a_supplies), ctx->supplies);
+		regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
 		return ret;
 	}
 
+	ctx->prepared = true;
 	return 0;
 }
 
@@ -128,13 +156,17 @@ static int tm_otm1901a_unprepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
+	if (!ctx->prepared)
+		return 0;
+
 	ret = tm_otm1901a_off(ctx);
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	regulator_bulk_disable(ARRAY_SIZE(tm_otm1901a_supplies), ctx->supplies);
+	regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
 
+	ctx->prepared = false;
 	return 0;
 }
 
@@ -150,13 +182,25 @@ static const struct drm_display_mode tm_otm1901a_mode = {
 	.vtotal = 1280 + 14 + 1 + 9,
 	.width_mm = 68,
 	.height_mm = 121,
-	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static int tm_otm1901a_get_modes(struct drm_panel *panel,
 				 struct drm_connector *connector)
 {
-	return drm_connector_helper_get_modes_fixed(connector, &tm_otm1901a_mode);
+	struct drm_display_mode *mode;
+
+	mode = drm_mode_duplicate(connector->dev, &tm_otm1901a_mode);
+	if (!mode)
+		return -ENOMEM;
+
+	drm_mode_set_name(mode);
+
+	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+	connector->display_info.width_mm = mode->width_mm;
+	connector->display_info.height_mm = mode->height_mm;
+	drm_mode_probed_add(connector, mode);
+
+	return 1;
 }
 
 static const struct drm_panel_funcs tm_otm1901a_panel_funcs = {
@@ -209,18 +253,17 @@ static int tm_otm1901a_probe(struct mipi_dsi_device *dsi)
 	struct tm_otm1901a *ctx;
 	int ret;
 
-	ctx = devm_drm_panel_alloc(dev, struct tm_otm1901a, panel,
-				   &tm_otm1901a_panel_funcs,
-				   DRM_MODE_CONNECTOR_DSI);
-	if (IS_ERR(ctx))
-		return PTR_ERR(ctx);
+	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
-	ret = devm_regulator_bulk_get_const(dev,
-					    ARRAY_SIZE(tm_otm1901a_supplies),
-					    tm_otm1901a_supplies,
-					    &ctx->supplies);
+	ctx->supplies[0].supply = "vddio";
+	ctx->supplies[1].supply = "avee";
+	ctx->supplies[2].supply = "avdd";
+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ctx->supplies),
+				      ctx->supplies);
 	if (ret < 0)
-		return ret;
+		return dev_err_probe(dev, ret, "Failed to get regulators\n");
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
@@ -241,6 +284,8 @@ static int tm_otm1901a_probe(struct mipi_dsi_device *dsi)
 			  MIPI_DSI_MODE_VIDEO_HSE |
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
 
+	drm_panel_init(&ctx->panel, dev, &tm_otm1901a_panel_funcs,
+		       DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
 	ctx->panel.backlight = tm_otm1901a_create_backlight(dsi);
@@ -252,8 +297,9 @@ static int tm_otm1901a_probe(struct mipi_dsi_device *dsi)
 
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
+		dev_err(dev, "Failed to attach to DSI host: %d\n", ret);
 		drm_panel_remove(&ctx->panel);
-		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
+		return ret;
 	}
 
 	return 0;
