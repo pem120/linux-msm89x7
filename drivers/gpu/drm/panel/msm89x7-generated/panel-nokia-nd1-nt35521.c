@@ -5,24 +5,24 @@
 
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/of.h>
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_probe_helper.h>
 
 struct mdss_dsi_nt35521 {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
-	bool prepared;
 };
 
 static inline
 struct mdss_dsi_nt35521 *to_mdss_dsi_nt35521(struct drm_panel *panel)
 {
-	return container_of(panel, struct mdss_dsi_nt35521, panel);
+	return container_of_const(panel, struct mdss_dsi_nt35521, panel);
 }
 
 static void mdss_dsi_nt35521_reset(struct mdss_dsi_nt35521 *ctx)
@@ -37,51 +37,29 @@ static void mdss_dsi_nt35521_reset(struct mdss_dsi_nt35521 *ctx)
 
 static int mdss_dsi_nt35521_on(struct mdss_dsi_nt35521 *ctx)
 {
-	struct mipi_dsi_device *dsi = ctx->dsi;
-	struct device *dev = &dsi->dev;
-	int ret;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
-	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to exit sleep mode: %d\n", ret);
-		return ret;
-	}
-	msleep(120);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
 
-	ret = mipi_dsi_dcs_set_display_on(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display on: %d\n", ret);
-		return ret;
-	}
-	msleep(120);
-
-	return 0;
+	return dsi_ctx.accum_err;
 }
 
 static int mdss_dsi_nt35521_off(struct mdss_dsi_nt35521 *ctx)
 {
-	struct mipi_dsi_device *dsi = ctx->dsi;
-	struct device *dev = &dsi->dev;
-	int ret;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
-	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
-	ret = mipi_dsi_dcs_set_display_off(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display off: %d\n", ret);
-		return ret;
-	}
-	msleep(120);
+	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
 
-	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to enter sleep mode: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
+	return dsi_ctx.accum_err;
 }
 
 static int mdss_dsi_nt35521_prepare(struct drm_panel *panel)
@@ -89,9 +67,6 @@ static int mdss_dsi_nt35521_prepare(struct drm_panel *panel)
 	struct mdss_dsi_nt35521 *ctx = to_mdss_dsi_nt35521(panel);
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
-
-	if (ctx->prepared)
-		return 0;
 
 	mdss_dsi_nt35521_reset(ctx);
 
@@ -102,7 +77,6 @@ static int mdss_dsi_nt35521_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
-	ctx->prepared = true;
 	return 0;
 }
 
@@ -112,16 +86,12 @@ static int mdss_dsi_nt35521_unprepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
-	if (!ctx->prepared)
-		return 0;
-
 	ret = mdss_dsi_nt35521_off(ctx);
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 
-	ctx->prepared = false;
 	return 0;
 }
 
@@ -137,25 +107,13 @@ static const struct drm_display_mode mdss_dsi_nt35521_mode = {
 	.vtotal = 1280 + 50 + 1 + 50,
 	.width_mm = 62,
 	.height_mm = 110,
+	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static int mdss_dsi_nt35521_get_modes(struct drm_panel *panel,
 				      struct drm_connector *connector)
 {
-	struct drm_display_mode *mode;
-
-	mode = drm_mode_duplicate(connector->dev, &mdss_dsi_nt35521_mode);
-	if (!mode)
-		return -ENOMEM;
-
-	drm_mode_set_name(mode);
-
-	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-	connector->display_info.width_mm = mode->width_mm;
-	connector->display_info.height_mm = mode->height_mm;
-	drm_mode_probed_add(connector, mode);
-
-	return 1;
+	return drm_connector_helper_get_modes_fixed(connector, &mdss_dsi_nt35521_mode);
 }
 
 static const struct drm_panel_funcs mdss_dsi_nt35521_panel_funcs = {
@@ -170,9 +128,11 @@ static int mdss_dsi_nt35521_probe(struct mipi_dsi_device *dsi)
 	struct mdss_dsi_nt35521 *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, struct mdss_dsi_nt35521, panel,
+				   &mdss_dsi_nt35521_panel_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
@@ -188,8 +148,6 @@ static int mdss_dsi_nt35521_probe(struct mipi_dsi_device *dsi)
 			  MIPI_DSI_MODE_VIDEO_HSE | MIPI_DSI_MODE_NO_EOT_PACKET |
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
-	drm_panel_init(&ctx->panel, dev, &mdss_dsi_nt35521_panel_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
 	ret = drm_panel_of_backlight(&ctx->panel);
@@ -200,9 +158,8 @@ static int mdss_dsi_nt35521_probe(struct mipi_dsi_device *dsi)
 
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
-		dev_err(dev, "Failed to attach to DSI host: %d\n", ret);
 		drm_panel_remove(&ctx->panel);
-		return ret;
+		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
 	}
 
 	return 0;

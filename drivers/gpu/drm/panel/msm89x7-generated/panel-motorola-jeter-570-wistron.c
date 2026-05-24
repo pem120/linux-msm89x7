@@ -5,23 +5,23 @@
 
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/of.h>
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_probe_helper.h>
 
 struct wistron_570_v0 {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
-	bool prepared;
 };
 
 static inline struct wistron_570_v0 *to_wistron_570_v0(struct drm_panel *panel)
 {
-	return container_of(panel, struct wistron_570_v0, panel);
+	return container_of_const(panel, struct wistron_570_v0, panel);
 }
 
 static void wistron_570_v0_reset(struct wistron_570_v0 *ctx)
@@ -36,59 +36,35 @@ static void wistron_570_v0_reset(struct wistron_570_v0 *ctx)
 
 static int wistron_570_v0_on(struct wistron_570_v0 *ctx)
 {
-	struct mipi_dsi_device *dsi = ctx->dsi;
-	struct device *dev = &dsi->dev;
-	int ret;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
-	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to exit sleep mode: %d\n", ret);
-		return ret;
-	}
-	msleep(120);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x50, 0x5a, 0x23);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0xdd, 0x0d);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x94, 0x2c);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x95, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x50, 0x5a, 0x2f);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x50, 0x00);
+	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 20);
 
-	mipi_dsi_dcs_write_seq(dsi, 0x50, 0x5a, 0x23);
-	mipi_dsi_dcs_write_seq(dsi, 0x90, 0xdd, 0x0d);
-	mipi_dsi_dcs_write_seq(dsi, 0x94, 0x2c);
-	mipi_dsi_dcs_write_seq(dsi, 0x95, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x50, 0x5a, 0x2f);
-	mipi_dsi_dcs_write_seq(dsi, 0x50, 0x00);
-
-	ret = mipi_dsi_dcs_set_display_on(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display on: %d\n", ret);
-		return ret;
-	}
-	msleep(20);
-
-	return 0;
+	return dsi_ctx.accum_err;
 }
 
 static int wistron_570_v0_off(struct wistron_570_v0 *ctx)
 {
-	struct mipi_dsi_device *dsi = ctx->dsi;
-	struct device *dev = &dsi->dev;
-	int ret;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
-	ret = mipi_dsi_dcs_set_display_off(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display off: %d\n", ret);
-		return ret;
-	}
-	msleep(90);
+	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 90);
+	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 20);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x04, 0x5a);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x05, 0x5a);
+	mipi_dsi_msleep(&dsi_ctx, 150);
 
-	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to enter sleep mode: %d\n", ret);
-		return ret;
-	}
-	msleep(20);
-
-	mipi_dsi_dcs_write_seq(dsi, 0x04, 0x5a);
-	mipi_dsi_dcs_write_seq(dsi, 0x05, 0x5a);
-	msleep(150);
-
-	return 0;
+	return dsi_ctx.accum_err;
 }
 
 static int wistron_570_v0_prepare(struct drm_panel *panel)
@@ -96,9 +72,6 @@ static int wistron_570_v0_prepare(struct drm_panel *panel)
 	struct wistron_570_v0 *ctx = to_wistron_570_v0(panel);
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
-
-	if (ctx->prepared)
-		return 0;
 
 	wistron_570_v0_reset(ctx);
 
@@ -109,7 +82,6 @@ static int wistron_570_v0_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
-	ctx->prepared = true;
 	return 0;
 }
 
@@ -119,16 +91,12 @@ static int wistron_570_v0_unprepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
-	if (!ctx->prepared)
-		return 0;
-
 	ret = wistron_570_v0_off(ctx);
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 
-	ctx->prepared = false;
 	return 0;
 }
 
@@ -144,25 +112,13 @@ static const struct drm_display_mode wistron_570_v0_mode = {
 	.vtotal = 1440 + 65 + 8 + 37,
 	.width_mm = 65,
 	.height_mm = 130,
+	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static int wistron_570_v0_get_modes(struct drm_panel *panel,
 				    struct drm_connector *connector)
 {
-	struct drm_display_mode *mode;
-
-	mode = drm_mode_duplicate(connector->dev, &wistron_570_v0_mode);
-	if (!mode)
-		return -ENOMEM;
-
-	drm_mode_set_name(mode);
-
-	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-	connector->display_info.width_mm = mode->width_mm;
-	connector->display_info.height_mm = mode->height_mm;
-	drm_mode_probed_add(connector, mode);
-
-	return 1;
+	return drm_connector_helper_get_modes_fixed(connector, &wistron_570_v0_mode);
 }
 
 static const struct drm_panel_funcs wistron_570_v0_panel_funcs = {
@@ -177,9 +133,11 @@ static int wistron_570_v0_probe(struct mipi_dsi_device *dsi)
 	struct wistron_570_v0 *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, struct wistron_570_v0, panel,
+				   &wistron_570_v0_panel_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
@@ -195,8 +153,6 @@ static int wistron_570_v0_probe(struct mipi_dsi_device *dsi)
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS |
 			  MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_LPM;
 
-	drm_panel_init(&ctx->panel, dev, &wistron_570_v0_panel_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
 	ret = drm_panel_of_backlight(&ctx->panel);
@@ -207,9 +163,8 @@ static int wistron_570_v0_probe(struct mipi_dsi_device *dsi)
 
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
-		dev_err(dev, "Failed to attach to DSI host: %d\n", ret);
 		drm_panel_remove(&ctx->panel);
-		return ret;
+		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
 	}
 
 	return 0;

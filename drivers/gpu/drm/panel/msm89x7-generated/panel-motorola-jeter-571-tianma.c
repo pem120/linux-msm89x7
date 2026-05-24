@@ -5,25 +5,25 @@
 
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/of.h>
 
 #include <video/mipi_display.h>
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_probe_helper.h>
 
 struct tianma_571_v0 {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
-	bool prepared;
 };
 
 static inline struct tianma_571_v0 *to_tianma_571_v0(struct drm_panel *panel)
 {
-	return container_of(panel, struct tianma_571_v0, panel);
+	return container_of_const(panel, struct tianma_571_v0, panel);
 }
 
 static void tianma_571_v0_reset(struct tianma_571_v0 *ctx)
@@ -38,62 +38,34 @@ static void tianma_571_v0_reset(struct tianma_571_v0 *ctx)
 
 static int tianma_571_v0_on(struct tianma_571_v0 *ctx)
 {
-	struct mipi_dsi_device *dsi = ctx->dsi;
-	struct device *dev = &dsi->dev;
-	int ret;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x98, 0x81, 0x03);
-	mipi_dsi_dcs_write_seq(dsi, 0x83, 0x60);
-	mipi_dsi_dcs_write_seq(dsi, 0x84, 0x03);
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x98, 0x81, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x98, 0x81, 0x03);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x83, 0x60);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x84, 0x03);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x98, 0x81, 0x00);
+	mipi_dsi_dcs_set_display_brightness_multi(&dsi_ctx, 0x200b);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
+				     0x2c);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x01);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 20);
 
-	ret = mipi_dsi_dcs_set_display_brightness(dsi, 0x200b);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display brightness: %d\n", ret);
-		return ret;
-	}
-
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x2c);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_POWER_SAVE, 0x01);
-
-	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to exit sleep mode: %d\n", ret);
-		return ret;
-	}
-	msleep(120);
-
-	ret = mipi_dsi_dcs_set_display_on(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display on: %d\n", ret);
-		return ret;
-	}
-	msleep(20);
-
-	return 0;
+	return dsi_ctx.accum_err;
 }
 
 static int tianma_571_v0_off(struct tianma_571_v0 *ctx)
 {
-	struct mipi_dsi_device *dsi = ctx->dsi;
-	struct device *dev = &dsi->dev;
-	int ret;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
-	ret = mipi_dsi_dcs_set_display_off(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set display off: %d\n", ret);
-		return ret;
-	}
-	msleep(20);
+	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 20);
+	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
 
-	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
-	if (ret < 0) {
-		dev_err(dev, "Failed to enter sleep mode: %d\n", ret);
-		return ret;
-	}
-	msleep(120);
-
-	return 0;
+	return dsi_ctx.accum_err;
 }
 
 static int tianma_571_v0_prepare(struct drm_panel *panel)
@@ -101,9 +73,6 @@ static int tianma_571_v0_prepare(struct drm_panel *panel)
 	struct tianma_571_v0 *ctx = to_tianma_571_v0(panel);
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
-
-	if (ctx->prepared)
-		return 0;
 
 	tianma_571_v0_reset(ctx);
 
@@ -114,7 +83,6 @@ static int tianma_571_v0_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
-	ctx->prepared = true;
 	return 0;
 }
 
@@ -124,16 +92,12 @@ static int tianma_571_v0_unprepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
-	if (!ctx->prepared)
-		return 0;
-
 	ret = tianma_571_v0_off(ctx);
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 
-	ctx->prepared = false;
 	return 0;
 }
 
@@ -149,25 +113,13 @@ static const struct drm_display_mode tianma_571_v0_mode = {
 	.vtotal = 1440 + 40 + 4 + 16,
 	.width_mm = 65,
 	.height_mm = 130,
+	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static int tianma_571_v0_get_modes(struct drm_panel *panel,
 				   struct drm_connector *connector)
 {
-	struct drm_display_mode *mode;
-
-	mode = drm_mode_duplicate(connector->dev, &tianma_571_v0_mode);
-	if (!mode)
-		return -ENOMEM;
-
-	drm_mode_set_name(mode);
-
-	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-	connector->display_info.width_mm = mode->width_mm;
-	connector->display_info.height_mm = mode->height_mm;
-	drm_mode_probed_add(connector, mode);
-
-	return 1;
+	return drm_connector_helper_get_modes_fixed(connector, &tianma_571_v0_mode);
 }
 
 static const struct drm_panel_funcs tianma_571_v0_panel_funcs = {
@@ -182,9 +134,11 @@ static int tianma_571_v0_probe(struct mipi_dsi_device *dsi)
 	struct tianma_571_v0 *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, struct tianma_571_v0, panel,
+				   &tianma_571_v0_panel_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
@@ -200,8 +154,6 @@ static int tianma_571_v0_probe(struct mipi_dsi_device *dsi)
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS |
 			  MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_LPM;
 
-	drm_panel_init(&ctx->panel, dev, &tianma_571_v0_panel_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
 	ret = drm_panel_of_backlight(&ctx->panel);
@@ -212,9 +164,8 @@ static int tianma_571_v0_probe(struct mipi_dsi_device *dsi)
 
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
-		dev_err(dev, "Failed to attach to DSI host: %d\n", ret);
 		drm_panel_remove(&ctx->panel);
-		return ret;
+		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
 	}
 
 	return 0;
